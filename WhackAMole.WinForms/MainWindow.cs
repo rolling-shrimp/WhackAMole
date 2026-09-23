@@ -1,142 +1,555 @@
-using WhackAMole.Core;
+using System.Drawing;
+using System.Windows.Forms;
 
-namespace WhackAMole.WinForms;
+namespace WhackAMole;
 
-public sealed class MainWindow : Form
+public class MainWindow : Form
 {
-    private readonly Game game = new();
-    private readonly System.Windows.Forms.Timer timer = new() { Interval = 25 };
-    private readonly Label status = new();
-    private readonly Label countdown = new();
-    private readonly Label firstScore = new();
-    private readonly Label secondScore = new();
-    private readonly Button action = new();
-    private readonly HoleButton[] holes = new HoleButton[16];
+    private Game _game;
+    private ErrorReporter _errors;
+    private System.Windows.Forms.Timer _timer = null!;
+    private TableLayoutPanel _screenLayout = null!;
+    private FlowLayoutPanel _information = null!;
+    private GameBoard _board = null!;
+    private Label _heading = null!;
+    private ScoreCard _firstLiveCard = null!;
+    private ScoreCard _secondLiveCard = null!;
+    private ScoreCard _firstResultCard = null!;
+    private ScoreCard _secondResultCard = null!;
+    private LegendPanel _legend = null!;
+    private Button _actionButton = null!;
+    private bool _stoppedByFault;
+    private string _currentScreen = string.Empty;
 
-    public MainWindow()
+    public MainWindow() : this(new Game(TimeProvider.System, new Random()))
     {
-        Text = "打地鼠 · 兩關挑戰";
-        Name = "WhackAMoleWindow";
-        ClientSize = new Size(860, 820);
-        MinimumSize = new Size(860, 820);
+    }
+
+    public MainWindow(Game game)
+    {
+        _game = game ?? throw new ArgumentNullException(nameof(game));
+        _errors = new ErrorReporter();
+        BuildWindow();
+        RunOperation(nameof(Game.InitializeGame), () =>
+        {
+            _game.InitializeGame();
+            ShowInitialScreen();
+        });
+    }
+
+    public string CurrentScreen
+    {
+        get { return _currentScreen; }
+    }
+
+    public GameBoard Board
+    {
+        get { return _board; }
+    }
+
+    public bool LegendShown
+    {
+        get { return _legend.Visible; }
+    }
+
+    public string ActionLabel
+    {
+        get { return _actionButton.Visible ? _actionButton.Text : string.Empty; }
+    }
+
+    public ScoreCard FirstResultCard
+    {
+        get { return _firstResultCard; }
+    }
+
+    public ScoreCard FirstLiveCard
+    {
+        get { return _firstLiveCard; }
+    }
+
+    public ScoreCard SecondLiveCard
+    {
+        get { return _secondLiveCard; }
+    }
+
+    public ScoreCard SecondResultCard
+    {
+        get { return _secondResultCard; }
+    }
+
+    public Button ActionButton
+    {
+        get { return _actionButton; }
+    }
+
+    public void HandleBoardClick(Point location)
+    {
+        RunOperation("TargetClick", () =>
+        {
+            bool paintedHit = _board.TryGetClickedTarget(location,
+                out int holeId, out long generation);
+            _game.UpdateTime();
+            if (paintedHit)
+            {
+                _game.HitRenderedTarget(holeId, generation);
+            }
+
+            ReconcileScreen();
+        });
+    }
+
+    public void ShowInitialScreen()
+    {
+        LevelState first = _game.GetLevelState(1);
+        if (first.Phase != LevelPhase.Ready)
+        {
+            ThrowScreenPhase(nameof(ShowInitialScreen));
+        }
+
+        HideInformation();
+        SetBoardWidth(58);
+        _firstLiveCard.SetState(first);
+        _firstLiveCard.Visible = true;
+        _board.Render(null);
+        _board.IsInteractive = false;
+        SetAction("開始");
+        _currentScreen = "FirstReady";
+        EnsureScreen(_board.RenderedTarget == null && !_board.IsInteractive &&
+            _firstLiveCard.CurrentState?.Points == 0 && _actionButton.Text == "開始" &&
+            (!Visible || !_legend.Visible), nameof(ShowInitialScreen),
+            "初始空棋盤、歸零記分板、開始按鈕且沒有第二關提示");
+    }
+
+    public void ShowPlayingScreen(int levelNumber)
+    {
+        ValidateLevelNumber(levelNumber);
+        LevelState state = _game.GetLevelState(levelNumber);
+        if (state.Phase != LevelPhase.Playing)
+        {
+            ThrowScreenPhase(nameof(ShowPlayingScreen));
+        }
+
+        HideInformation();
+        SetBoardWidth(58);
+        _board.IsInteractive = true;
+        if (levelNumber == 1)
+        {
+            _firstLiveCard.Visible = true;
+            _currentScreen = "FirstPlaying";
+        }
+        else
+        {
+            _secondLiveCard.Visible = true;
+            _legend.Visible = true;
+            _currentScreen = "SecondPlaying";
+        }
+
+        UpdateScoreboard(levelNumber);
+        RenderTarget(levelNumber);
+        EnsureScreen(_board.IsInteractive &&
+            (levelNumber == 1 ? (!Visible || !_legend.Visible) :
+                (!Visible || _legend.Visible)) &&
+            (!Visible || !_actionButton.Visible),
+            nameof(ShowPlayingScreen), "只顯示指定關卡的遊玩資訊與正確提示");
+    }
+
+    public void RenderTarget(int levelNumber)
+    {
+        ValidateLevelNumber(levelNumber);
+        LevelState state = _game.GetLevelState(levelNumber);
+        _board.Render(state.ActiveTarget);
+        TargetState? painted = _board.RenderedTarget;
+        EnsureScreen((painted == null && state.ActiveTarget == null) ||
+            (painted != null && state.ActiveTarget != null &&
+             painted.HoleId == state.ActiveTarget.HoleId &&
+             painted.Generation == state.ActiveTarget.Generation &&
+             painted.Kind == state.ActiveTarget.Kind),
+            nameof(RenderTarget), "棋盤只能繪製指定關卡目前有效的目標");
+    }
+
+    public void UpdateScoreboard(int levelNumber)
+    {
+        ValidateLevelNumber(levelNumber);
+        LevelState state = _game.GetLevelState(levelNumber);
+        ScoreCard card = levelNumber == 1 ? _firstLiveCard : _secondLiveCard;
+        card.SetState(state);
+        EnsureScreen(card.CurrentState?.LevelNumber == levelNumber &&
+            card.CurrentState.Points == state.Points &&
+            card.CurrentState.MouseHits == state.MouseHits &&
+            card.CurrentState.HamsterHits == state.HamsterHits &&
+            card.CurrentState.BombHits == state.BombHits,
+            nameof(UpdateScoreboard), "記分板應呈現指定關卡的已處理分數與紀錄");
+    }
+
+    public void ShowFirstLevelResult()
+    {
+        LevelState first = _game.GetLevelState(1);
+        if (first.Phase != LevelPhase.Passed && first.Phase != LevelPhase.Failed)
+        {
+            ThrowScreenPhase(nameof(ShowFirstLevelResult));
+        }
+
+        HideInformation();
+        SetBoardWidth(48);
+        _board.Render(null);
+        _board.IsInteractive = false;
+        _heading.Text = first.Phase == LevelPhase.Passed ? "第一關過關" : "Game Over";
+        _heading.Visible = true;
+        _firstResultCard.SetHeading("第一關");
+        _firstResultCard.SetState(first);
+        _firstResultCard.Visible = true;
+        SetAction(first.Phase == LevelPhase.Passed ? "開始" : "重玩");
+        _currentScreen = first.Phase == LevelPhase.Passed ? "FirstPassed" : "FirstFailed";
+        EnsureScreen(_board.RenderedTarget == null && !_board.IsInteractive &&
+            _firstResultCard.CurrentState?.Points == first.Points &&
+            _actionButton.Text == (first.Phase == LevelPhase.Passed ? "開始" : "重玩"),
+            nameof(ShowFirstLevelResult), "空棋盤、第一關成績卡與正確按鈕");
+    }
+
+    public void ShowSecondLevelReadyScreen()
+    {
+        LevelState first = _game.GetLevelState(1);
+        LevelState second = _game.GetLevelState(2);
+        if (first.Phase != LevelPhase.Passed || second.Phase != LevelPhase.Ready)
+        {
+            ThrowScreenPhase(nameof(ShowSecondLevelReadyScreen));
+        }
+
+        HideInformation();
+        SetBoardWidth(48);
+        _board.Render(null);
+        _board.IsInteractive = false;
+        _heading.Text = "第一關過關";
+        _heading.Visible = true;
+        _firstResultCard.SetState(first);
+        _firstResultCard.Visible = true;
+        _secondLiveCard.SetState(second);
+        _secondLiveCard.Visible = true;
+        _legend.Visible = true;
+        SetAction("開始");
+        _currentScreen = "SecondReady";
+        EnsureScreen(_board.RenderedTarget == null && !_board.IsInteractive &&
+            _firstResultCard.CurrentState?.Points == first.Points &&
+            _secondLiveCard.CurrentState?.Points == 0 &&
+            _actionButton.Text == "開始" && (!Visible || _legend.Visible),
+            nameof(ShowSecondLevelReadyScreen),
+            "第一關成績、第二關歸零記分板、得扣分提示與開始同畫面");
+    }
+
+    public void ShowGameResult()
+    {
+        LevelState first = _game.GetLevelState(1);
+        LevelState second = _game.GetLevelState(2);
+        if (second.Phase != LevelPhase.Won && second.Phase != LevelPhase.Failed)
+        {
+            ThrowScreenPhase(nameof(ShowGameResult));
+        }
+
+        HideInformation();
+        SetBoardWidth(48);
+        _board.Render(null);
+        _board.IsInteractive = false;
+        _heading.Text = second.Phase == LevelPhase.Won ? "闖關成功" : "Game Over";
+        _heading.Visible = true;
+        _firstResultCard.SetState(first);
+        _firstResultCard.Visible = true;
+        _secondResultCard.SetState(second);
+        _secondResultCard.Visible = true;
+        SetAction("重玩");
+        _currentScreen = second.Phase == LevelPhase.Won ? "SecondWon" : "SecondFailed";
+        EnsureScreen(_board.RenderedTarget == null && !_board.IsInteractive &&
+            _firstResultCard.CurrentState?.Points == first.Points &&
+            _secondResultCard.CurrentState?.Points == second.Points &&
+            _actionButton.Text == "重玩" && (!Visible || !_legend.Visible),
+            nameof(ShowGameResult), "空棋盤、兩張完整成績卡、結果及重玩按鈕");
+    }
+
+    private void BuildWindow()
+    {
+        Text = "打地鼠遊戲";
+        ClientSize = new Size(1280, 720);
+        MinimumSize = new Size(1100, 730);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Color.FromArgb(244, 247, 241);
-        ForeColor = Color.FromArgb(35, 58, 48);
-        Font = new Font("Microsoft JhengHei UI", 10F);
-        AutoScaleMode = AutoScaleMode.Dpi;
+        Font = new Font("Microsoft JhengHei UI", 10);
 
-        var layout = new TableLayoutPanel
+        ConsoleShell shell = new ConsoleShell();
+        shell.Dock = DockStyle.Fill;
+        Controls.Add(shell);
+
+        _screenLayout = new TableLayoutPanel();
+        _screenLayout.Dock = DockStyle.Fill;
+        _screenLayout.ColumnCount = 2;
+        _screenLayout.RowCount = 1;
+        _screenLayout.BackColor = Color.FromArgb(177, 194, 122);
+        _screenLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+        _screenLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+        _screenLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        shell.Controls.Add(_screenLayout);
+
+        _board = new GameBoard();
+        _board.Dock = DockStyle.Fill;
+        _board.Margin = new Padding(8);
+        _board.MouseDown += BoardMouseDown;
+        _screenLayout.Controls.Add(_board, 0, 0);
+
+        _information = new FlowLayoutPanel();
+        _information.Dock = DockStyle.Fill;
+        _information.FlowDirection = FlowDirection.TopDown;
+        _information.WrapContents = false;
+        _information.AutoScroll = true;
+        _information.Padding = new Padding(4);
+        _information.ClientSizeChanged += InformationSizeChanged;
+        _screenLayout.Controls.Add(_information, 1, 0);
+
+        _heading = new Label();
+        _heading.Height = 50;
+        _heading.TextAlign = ContentAlignment.MiddleCenter;
+        _heading.Font = new Font("Microsoft JhengHei UI", 27, FontStyle.Bold);
+        _heading.BackColor = Color.FromArgb(190, 204, 135);
+        _heading.ForeColor = Color.FromArgb(28, 43, 29);
+        _heading.Margin = new Padding(3, 3, 3, 8);
+
+        _firstLiveCard = new ScoreCard(1, true);
+        _secondLiveCard = new ScoreCard(2, true);
+        _firstResultCard = new ScoreCard(1, false);
+        _secondResultCard = new ScoreCard(2, false);
+        _legend = new LegendPanel();
+        _actionButton = new Button();
+        _actionButton.Height = 59;
+        _actionButton.Font = new Font("Microsoft JhengHei UI", 27, FontStyle.Bold);
+        _actionButton.BackColor = Color.FromArgb(192, 207, 133);
+        _actionButton.ForeColor = Color.FromArgb(29, 43, 28);
+        _actionButton.FlatStyle = FlatStyle.Flat;
+        _actionButton.FlatAppearance.BorderSize = 3;
+        _actionButton.Margin = new Padding(3, 9, 3, 3);
+        _actionButton.Click += ActionButtonClick;
+
+        _information.Controls.Add(_heading);
+        _information.Controls.Add(_firstLiveCard);
+        _information.Controls.Add(_firstResultCard);
+        _information.Controls.Add(_secondLiveCard);
+        _information.Controls.Add(_secondResultCard);
+        _information.Controls.Add(_legend);
+        _information.Controls.Add(_actionButton);
+        ResizeInformationCards();
+
+        _timer = new System.Windows.Forms.Timer();
+        _timer.Interval = 50;
+        _timer.Tick += TimerTick;
+        FormClosed += WindowClosed;
+    }
+
+    private void InformationSizeChanged(object? sender, EventArgs e)
+    {
+        ResizeInformationCards();
+    }
+
+    private void ResizeInformationCards()
+    {
+        if (_information == null)
         {
-            Dock = DockStyle.Fill, Padding = new Padding(28, 20, 28, 20),
-            ColumnCount = 1, RowCount = 6
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 3; i++)
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        Controls.Add(layout);
-
-        var title = new Label
-        {
-            Text = "打地鼠", Dock = DockStyle.Fill, AutoSize = true,
-            Font = new Font(Font.FontFamily, 26, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        layout.Controls.Add(title, 0, 0);
-        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 8, 0, 8) };
-        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 72));
-        heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
-        SetLabel(status, "Status", ContentAlignment.MiddleLeft);
-        SetLabel(countdown, "Countdown", ContentAlignment.MiddleRight);
-        heading.Controls.Add(status, 0, 0);
-        heading.Controls.Add(countdown, 1, 0);
-        layout.Controls.Add(heading, 0, 1);
-
-        var scores = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 8, 0, 12) };
-        scores.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        scores.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        SetLabel(firstScore, "FirstScore", ContentAlignment.MiddleLeft);
-        SetLabel(secondScore, "SecondScore", ContentAlignment.MiddleLeft);
-        scores.Controls.Add(firstScore, 0, 0);
-        scores.Controls.Add(secondScore, 1, 0);
-        layout.Controls.Add(scores, 0, 2);
-
-        var board = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 4 };
-        for (var i = 0; i < 4; i++)
-        {
-            board.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-            board.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
+            return;
         }
-        for (var i = 0; i < holes.Length; i++)
+
+        int width = Math.Max(100, _information.ClientSize.Width - 25);
+        foreach (Control child in _information.Controls)
         {
-            var hole = i;
-            holes[i] = new HoleButton { Dock = DockStyle.Fill, Margin = new Padding(5), Name = $"Hole{i + 1:00}" };
-            holes[i].Click += (_, _) => { game.Hit(hole); Render(); };
-            board.Controls.Add(holes[i], i % 4, i / 4);
+            child.Width = width;
         }
-        layout.Controls.Add(board, 0, 3);
-        action.Name = "Action";
-        action.AccessibleName = "開始或重玩";
-        action.Size = new Size(180, 48);
-        action.Anchor = AnchorStyles.None;
-        action.FlatStyle = FlatStyle.Flat;
-        action.BackColor = Color.FromArgb(38, 101, 73);
-        action.ForeColor = Color.White;
-        action.Click += (_, _) =>
-        {
-            if (game.Phase is Phase.ReadyFirst or Phase.ReadySecond) game.Start();
-            else game.Replay();
-            Render();
-        };
-        layout.Controls.Add(action, 0, 4);
-        layout.Controls.Add(new Label
-        {
-            Text = "灰色老鼠 +1　 ·　 棕色倉鼠 +3　 ·　 炸彈 −2（最低 0 分）",
-            Dock = DockStyle.Fill, AutoSize = true, TextAlign = ContentAlignment.MiddleCenter,
-            Font = new Font(Font.FontFamily, 10F)
-        }, 0, 5);
-        timer.Tick += (_, _) => { game.Tick(); Render(); };
-        Render();
-        timer.Start();
     }
 
-    private static void SetLabel(Label label, string name, ContentAlignment alignment)
+    private void SetBoardWidth(float percent)
     {
-        label.Name = name;
-        label.AutoSize = true;
-        label.AccessibleName = name;
-        label.Dock = DockStyle.Fill;
-        label.TextAlign = alignment;
+        _screenLayout.ColumnStyles[0].Width = percent;
+        _screenLayout.ColumnStyles[1].Width = 100 - percent;
     }
 
-    private void Render()
+    private void HideInformation()
     {
-        status.Text = game.Phase switch
+        _information.SuspendLayout();
+        _heading.Visible = false;
+        _firstLiveCard.Visible = false;
+        _secondLiveCard.Visible = false;
+        _firstResultCard.Visible = false;
+        _secondResultCard.Visible = false;
+        _legend.Visible = false;
+        _actionButton.Visible = false;
+        _information.ResumeLayout();
+    }
+
+    private void SetAction(string text)
+    {
+        _actionButton.Text = text;
+        _actionButton.AccessibleName = text;
+        _actionButton.Visible = true;
+        _actionButton.Enabled = !_stoppedByFault;
+    }
+
+    private void ActionButtonClick(object? sender, EventArgs e)
+    {
+        RunOperation("ActionButton", () =>
         {
-            Phase.ReadyFirst => "準備挑戰第一關 · 目標 42 分",
-            Phase.PlayingFirst => "第一關 · 目標 42 分",
-            Phase.ReadySecond => $"第一關過關！按開始挑戰第二關\n第一關分數：{game.First.Points} · 命中灰色老鼠數量：{game.First.Mice}",
-            Phase.PlayingSecond => "第二關 · 目標 52 分",
-            Phase.LostFirst => "Game Over · 第一關未通過",
-            Phase.Won => "闖關成功！",
-            _ => "Game Over · 第二關未通過"
-        };
-        countdown.Text = $"剩餘 {Math.Ceiling(game.Remaining.TotalSeconds):0} 秒";
-        firstScore.Text = $"第一關分數：{game.First.Points}\n命中灰色老鼠數量：{game.First.Mice}";
-        secondScore.Text = $"第二關分數：{game.Second.Points}\n命中灰色老鼠數量：{game.Second.Mice}\n命中棕色倉鼠數量：{game.Second.Hamsters}\n點中炸彈數量：{game.Second.Bombs}";
-        firstScore.Visible = game.Phase is not (Phase.ReadySecond or Phase.PlayingSecond);
-        secondScore.Visible = game.Phase is Phase.ReadySecond or Phase.PlayingSecond or Phase.Won or Phase.LostSecond;
-        action.Visible = !game.IsPlaying;
-        action.Text = game.Phase is Phase.ReadyFirst or Phase.ReadySecond ? "開始" : "重玩";
-        for (var i = 0; i < holes.Length; i++)
-            holes[i].ShowTarget(game.ActiveTarget?.Hole == i ? game.ActiveTarget.Kind : null);
+            LevelState first = _game.GetLevelState(1);
+            LevelState second = _game.GetLevelState(2);
+            if (first.Phase == LevelPhase.Ready)
+            {
+                _game.StartFirstLevel();
+                ShowPlayingScreen(1);
+                _timer.Start();
+            }
+            else if (first.Phase == LevelPhase.Passed && second.Phase == LevelPhase.Ready)
+            {
+                _game.StartSecondLevel();
+                ShowPlayingScreen(2);
+                _timer.Start();
+            }
+            else if (first.Phase == LevelPhase.Failed ||
+                     second.Phase == LevelPhase.Won || second.Phase == LevelPhase.Failed)
+            {
+                _game.RestartGame();
+                ShowPlayingScreen(1);
+                _timer.Start();
+            }
+        });
     }
 
-    protected override void Dispose(bool disposing)
+    private void BoardMouseDown(object? sender, MouseEventArgs e)
     {
-        if (disposing) timer.Dispose();
-        base.Dispose(disposing);
+        HandleBoardClick(e.Location);
+    }
+
+    private void TimerTick(object? sender, EventArgs e)
+    {
+        RunOperation(nameof(Game.UpdateTime), () =>
+        {
+            _game.UpdateTime();
+            ReconcileScreen();
+        });
+    }
+
+    private void ReconcileScreen()
+    {
+        LevelState first = _game.GetLevelState(1);
+        LevelState second = _game.GetLevelState(2);
+        if (first.Phase == LevelPhase.Playing)
+        {
+            if (_currentScreen != "FirstPlaying")
+            {
+                ShowPlayingScreen(1);
+            }
+            else
+            {
+                RenderTarget(1);
+                UpdateScoreboard(1);
+            }
+        }
+        else if (second.Phase == LevelPhase.Playing)
+        {
+            if (_currentScreen != "SecondPlaying")
+            {
+                ShowPlayingScreen(2);
+            }
+            else
+            {
+                RenderTarget(2);
+                UpdateScoreboard(2);
+            }
+        }
+        else if (first.Phase == LevelPhase.Passed && second.Phase == LevelPhase.Ready)
+        {
+            _timer.Stop();
+            ShowFirstLevelResult();
+            ShowSecondLevelReadyScreen();
+        }
+        else if (first.Phase == LevelPhase.Failed)
+        {
+            _timer.Stop();
+            ShowFirstLevelResult();
+        }
+        else if (second.Phase == LevelPhase.Won || second.Phase == LevelPhase.Failed)
+        {
+            _timer.Stop();
+            ShowGameResult();
+        }
+    }
+
+    private void RunOperation(string entry, Action action)
+    {
+        if (_stoppedByFault)
+        {
+            return;
+        }
+
+        try
+        {
+            action();
+        }
+        catch (ArgumentOutOfRangeException exception)
+        {
+            _errors.Record(entry, exception);
+            string message = exception.ParamName == "holeId" ?
+                "洞口編號無效" : "關卡編號無效";
+            MessageBox.Show(this, message, "操作錯誤", MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+        catch (InvalidOperationException exception)
+        {
+            _errors.Record(entry, exception);
+            string message = exception.Data["Contract"] as string == nameof(Game.FinishLevel) ?
+                "目前無法結算關卡" : "目前無法執行此畫面操作";
+            MessageBox.Show(this, message, "操作錯誤", MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+        catch (OutputContractViolationException exception)
+        {
+            StopAfterFault(entry, exception);
+        }
+        catch (Exception exception)
+        {
+            StopAfterFault(entry, exception);
+        }
+    }
+
+    private void StopAfterFault(string entry, Exception exception)
+    {
+        _timer.Stop();
+        _board.IsInteractive = false;
+        _actionButton.Enabled = false;
+        _stoppedByFault = true;
+        _errors.Record(entry, exception);
+        MessageBox.Show(this, "遊戲發生錯誤，本局已停止", "遊戲錯誤",
+            MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private void ValidateLevelNumber(int levelNumber)
+    {
+        if (levelNumber != 1 && levelNumber != 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(levelNumber), levelNumber,
+                "關卡編號必須為 1 或 2");
+        }
+    }
+
+    private void ThrowScreenPhase(string method)
+    {
+        InvalidOperationException exception = new InvalidOperationException(
+            $"{method} 目前階段不適用");
+        exception.Data["Contract"] = method;
+        throw exception;
+    }
+
+    private void EnsureScreen(bool condition, string method, string guarantee)
+    {
+        if (!condition)
+        {
+            throw new OutputContractViolationException(method, guarantee,
+                $"screen={_currentScreen}, action={_actionButton.Text}, target={_board.RenderedTarget?.Generation}");
+        }
+    }
+
+    private void WindowClosed(object? sender, FormClosedEventArgs e)
+    {
+        _timer.Stop();
+        _timer.Dispose();
     }
 }

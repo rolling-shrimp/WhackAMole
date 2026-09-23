@@ -1,11 +1,4 @@
-namespace WhackAMole.WinForms;
+using WhackAMole;
 
-static class Program
-{
-    [STAThread]
-    static void Main()
-    {
-        ApplicationConfiguration.Initialize();
-        Application.Run(new MainWindow());
-    }
-}
+ApplicationConfiguration.Initialize();
+Application.Run(new MainWindow());
