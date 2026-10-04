@@ -184,7 +184,11 @@ public class MainWindow : Form
     public void ShowFirstLevelResult()
     {
         LevelState first = _game.GetLevelState(1);
-        if (first.Phase != LevelPhase.Passed && first.Phase != LevelPhase.Failed)
+        LevelState second = _game.GetLevelState(2);
+        bool canShowFirstLevelResult =
+            (first.Phase == LevelPhase.Failed && second.Phase == LevelPhase.NotStarted) ||
+            (first.Phase == LevelPhase.Passed && second.Phase == LevelPhase.Ready);
+        if (!canShowFirstLevelResult)
         {
             ThrowScreenPhase(nameof(ShowFirstLevelResult));
         }

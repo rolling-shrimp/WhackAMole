@@ -106,6 +106,101 @@ public class ScreenContractTests
     }
 
     [Fact]
+    public void ShowFirstLevelResult_AcceptsPassedResultBeforeSecondLevelReady()
+    {
+        new StaRunner().Run(() =>
+        {
+            using MainWindow form = CreateForm(out Game game, out ManualTimeProvider clock);
+            form.Show();
+            PassFirstLevel(game, clock);
+
+            form.ShowFirstLevelResult();
+
+            Assert.Equal("FirstPassed", form.CurrentScreen);
+            Assert.True(form.FirstResultCard.Visible);
+            Assert.Equal(42, form.FirstResultCard.CurrentState?.Points);
+            Assert.Equal("開始", form.ActionLabel);
+
+            form.ShowSecondLevelReadyScreen();
+            Assert.Equal("SecondReady", form.CurrentScreen);
+            Assert.True(form.FirstResultCard.Visible);
+            Assert.True(form.SecondLiveCard.Visible);
+            Assert.True(form.LegendShown);
+            Assert.Equal("開始", form.ActionLabel);
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void ShowFirstLevelResult_RejectsReadyPhaseWithoutChangingScreenOrGame()
+    {
+        new StaRunner().Run(() =>
+        {
+            using MainWindow form = CreateForm(out Game game, out ManualTimeProvider clock);
+            form.Show();
+            AssertFirstLevelResultRejectedWithoutChanges(form, game, clock);
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void ShowFirstLevelResult_RejectsFirstPlayingPhaseWithoutChangingScreenOrGame()
+    {
+        new StaRunner().Run(() =>
+        {
+            using MainWindow form = CreateForm(out Game game, out ManualTimeProvider clock);
+            form.Show();
+            game.StartFirstLevel();
+            form.ShowPlayingScreen(1);
+
+            AssertFirstLevelResultRejectedWithoutChanges(form, game, clock);
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void ShowFirstLevelResult_RejectsSecondPlayingPhaseWithoutChangingScreenOrGame()
+    {
+        new StaRunner().Run(() =>
+        {
+            using MainWindow form = CreateForm(out Game game, out ManualTimeProvider clock);
+            form.Show();
+            StartSecondLevelForScreen(form, game, clock);
+
+            AssertFirstLevelResultRejectedWithoutChanges(form, game, clock);
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void ShowFirstLevelResult_RejectsSecondWonPhaseWithoutChangingScreenOrGame()
+    {
+        new StaRunner().Run(() =>
+        {
+            using MainWindow form = CreateForm(out Game game, out ManualTimeProvider clock);
+            form.Show();
+            FinishSecondLevelForScreen(form, game, clock, true);
+
+            AssertFirstLevelResultRejectedWithoutChanges(form, game, clock);
+            form.Close();
+        });
+    }
+
+    [Fact]
+    public void ShowFirstLevelResult_RejectsSecondFailedPhaseWithoutChangingScreenOrGame()
+    {
+        new StaRunner().Run(() =>
+        {
+            using MainWindow form = CreateForm(out Game game, out ManualTimeProvider clock);
+            form.Show();
+            FinishSecondLevelForScreen(form, game, clock, false);
+
+            AssertFirstLevelResultRejectedWithoutChanges(form, game, clock);
+            form.Close();
+        });
+    }
+
+    [Fact]
     public void ShowSecondLevelReadyScreen_combines_first_result_and_second_rules()
     {
         new StaRunner().Run(() =>
@@ -216,5 +311,104 @@ public class ScreenContractTests
         clock.Advance(TimeSpan.FromSeconds(60));
         game.UpdateTime();
         Assert.Equal(LevelPhase.Passed, game.GetLevelState(1).Phase);
+    }
+
+    private void StartSecondLevelForScreen(MainWindow form, Game game,
+        ManualTimeProvider clock)
+    {
+        PassFirstLevel(game, clock);
+        form.ShowFirstLevelResult();
+        form.ShowSecondLevelReadyScreen();
+        game.StartSecondLevel();
+        form.ShowPlayingScreen(2);
+    }
+
+    private void FinishSecondLevelForScreen(MainWindow form, Game game,
+        ManualTimeProvider clock, bool win)
+    {
+        StartSecondLevelForScreen(form, game, clock);
+        if (win)
+        {
+            for (int index = 0; index < 52; index++)
+            {
+                Assert.True(game.HitHole(1));
+                clock.Advance(TimeSpan.FromMilliseconds(700));
+                game.UpdateTime();
+            }
+        }
+
+        clock.Advance(TimeSpan.FromSeconds(60));
+        game.UpdateTime();
+        Assert.Equal(win ? LevelPhase.Won : LevelPhase.Failed,
+            game.GetLevelState(2).Phase);
+        form.ShowGameResult();
+    }
+
+    private void AssertFirstLevelResultRejectedWithoutChanges(MainWindow form,
+        Game game, ManualTimeProvider clock)
+    {
+        object?[] before = CaptureFirstLevelResultAttemptState(form, game, clock);
+
+        Assert.Throws<InvalidOperationException>(() => form.ShowFirstLevelResult());
+
+        object?[] after = CaptureFirstLevelResultAttemptState(form, game, clock);
+        Assert.Equal(before, after);
+    }
+
+    private object?[] CaptureFirstLevelResultAttemptState(MainWindow form,
+        Game game, ManualTimeProvider clock)
+    {
+        LevelState first = game.GetLevelState(1);
+        LevelState second = game.GetLevelState(2);
+        TargetState? renderedTarget = form.Board.RenderedTarget;
+
+        return new object?[]
+        {
+            form.CurrentScreen,
+            renderedTarget?.HoleId,
+            renderedTarget?.Kind,
+            renderedTarget?.Generation,
+            form.Board.IsInteractive,
+            form.FirstLiveCard.Visible,
+            form.SecondLiveCard.Visible,
+            form.FirstResultCard.Visible,
+            form.SecondResultCard.Visible,
+            form.LegendShown,
+            form.ActionButton.Text,
+            form.ActionButton.AccessibleName,
+            form.ActionButton.Visible,
+            form.ActionButton.Enabled,
+            form.FirstLiveCard.CurrentState?.Points,
+            form.FirstLiveCard.CurrentState?.MouseHits,
+            form.SecondLiveCard.CurrentState?.Points,
+            form.SecondLiveCard.CurrentState?.MouseHits,
+            form.SecondLiveCard.CurrentState?.HamsterHits,
+            form.SecondLiveCard.CurrentState?.BombHits,
+            form.FirstResultCard.CurrentState?.Points,
+            form.FirstResultCard.CurrentState?.MouseHits,
+            form.SecondResultCard.CurrentState?.Points,
+            form.SecondResultCard.CurrentState?.MouseHits,
+            form.SecondResultCard.CurrentState?.HamsterHits,
+            form.SecondResultCard.CurrentState?.BombHits,
+            first.Phase,
+            first.Remaining,
+            first.Points,
+            first.MouseHits,
+            first.HamsterHits,
+            first.BombHits,
+            first.ActiveTarget?.HoleId,
+            first.ActiveTarget?.Kind,
+            first.ActiveTarget?.Generation,
+            second.Phase,
+            second.Remaining,
+            second.Points,
+            second.MouseHits,
+            second.HamsterHits,
+            second.BombHits,
+            second.ActiveTarget?.HoleId,
+            second.ActiveTarget?.Kind,
+            second.ActiveTarget?.Generation,
+            clock.GetTimestamp()
+        };
     }
 }
